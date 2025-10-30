@@ -3,32 +3,270 @@ title: "EV Power - Lab 4 Project Report"
 format: typst
 ---
 
-# Example Solution 1
+# 
 
 ## **Part 0: libraries**
 
-```{r}
-
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(stringr)
+library(readr)
+library(sf)
+library(tigris)
 ```
 
 ## **Part 1:** **Defining Research Question**
 
-Chosen Question:
+Chosen Question: What is the relationship between the average energy prices in each state and the number of registered electric vehicles in 2023?
 
 ## **Part 2: Data Preparation and Cleaning**
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+price_path <- "data/av-energy-price-2021-2023.csv"
+if (!file.exists(price_path)) price_path <- file.choose()
 
-```{r}
+price_raw <- read_csv(price_path, col_names = FALSE, show_col_types = FALSE) |>
+  filter(!is.na(X1), str_trim(X1) != "")
 
+price_header <- str_split(price_raw$X1[2], ",")[[1]] |> str_trim()
+
+price_data <- price_raw |> slice(-(1:2))
+
+price_df <- price_data |>
+  separate(
+    col  = X1,
+    into = c("state", "price_2021", "price_2022", "price_2023"),
+    sep  = ",",
+    fill = "right",
+    extra = "merge"
+  )
+
+clean_price <- function(x) {
+  x |>
+    str_replace_all("\\$", "") |>
+    str_replace_all("USD", "") |>
+    str_replace_all("≈", "") |>
+    str_replace_all("about", "") |>
+    str_replace_all("per MMBtu", "") |>
+    str_replace_all("est\\.", "") |>
+    str_trim() |>
+    parse_number()
+}
+
+price_clean <- price_df |>
+  mutate(
+    state       = str_trim(state),
+    price_2021  = clean_price(price_2021),
+    price_2022  = clean_price(price_2022),
+    price_2023  = clean_price(price_2023)
+  )
+
+price_2023_clean <- price_clean |>
+  select(state, energy_price_2023 = price_2023) |>
+  filter(!is.na(state), state != "")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+ev_path <- "data/ev-registrations-by-state-2023.csv"
+if (!file.exists(ev_path)) ev_path <- file.choose()
+
+ev_raw <- read_csv(ev_path, col_names = FALSE, show_col_types = FALSE)
+
+ev_clean <- ev_raw |>
+  filter(!(is.na(X1) & is.na(X2))) |>
+  slice(-(1:2)) |>
+  transmute(
+    state_raw = str_trim(X1),
+    ev_count  = X2 |>
+      str_replace_all("#", "") |>
+      str_replace_all(",", "") |>
+      str_trim() |>
+      parse_number()
+  ) |>
+
+  filter(!str_detect(str_to_lower(state_raw), "united states"),
+         !is.na(ev_count))
+
+state_xwalk <- tibble(
+  state_name = state.name,
+  state      = state.abb
+) |>
+  add_row(state_name = "District of Columbia", state = "DC")
+
+ev_2023_clean <- ev_clean |>
+  left_join(state_xwalk, by = c("state_raw" = "state_name")) |>
+  mutate(
+    state = coalesce(state, state_raw),
+    state = str_trim(state)
+  ) |>
+  select(state, ev_count)
+
+cat("\n price_2023_clean:\n")
+print(head(price_2023_clean, 10))
+
+cat("\n ev_2023_clean:\n")
+print(head(ev_2023_clean, 10))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+price_2023_clean <- price_2023_clean |>
+  filter(state != "State")
+
+analysis_df <- price_2023_clean |>
+  inner_join(ev_2023_clean, by = "state")
+
+analysis_df
 ```
 
 ## **Part 3: Joining / Pivoting Datasets for Analysis**
 
-```{r}
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+load_energy_wide <- function(path, year, value_name) {
+  df <- read_csv(path, show_col_types = FALSE)
+  # Source
+  names(df)[1] <- "Source"
+  df_long <- df |>
+    pivot_longer(
+      cols = -Source,
+      names_to = "state",
+      values_to = value_name
+    ) |>
+    mutate(
+      year  = year,
+      state = str_trim(state)
+    )
+  return(df_long)
+}
+
+renew_2021 <- load_energy_wide("data/renew-use-2021.csv", 2021, "renew")
+renew_2022 <- load_energy_wide("data/renew-use-2022.csv", 2022, "renew")
+renew_2023 <- load_energy_wide("data/renew-use-2023.csv", 2023, "renew")
+
+total_2021 <- load_energy_wide("data/total-use-2021.csv", 2021, "total_use")
+total_2022 <- load_energy_wide("data/total-use-2022.csv", 2022, "total_use")
+total_2023 <- load_energy_wide("data/total-use-2023.csv", 2023, "total_use")
+
+renew_all <- bind_rows(renew_2021, renew_2022, renew_2023)
+total_all <- bind_rows(total_2021, total_2022, total_2023)
+
+energy_long <- renew_all |>
+  full_join(total_all, by = c("Source", "state", "year"))
+
+energy_long <- energy_long |>
+  mutate(
+    renew     = readr::parse_number(as.character(renew)),
+    total_use = readr::parse_number(as.character(total_use))
+  )
+
+
+energy_long <- energy_long |>
+  mutate(
+    renew_share = if_else(!is.na(renew) & !is.na(total_use) & total_use > 0,
+                          renew / total_use,
+                          NA_real_)
+  )
+
+energy_state_year <- energy_long |>
+  group_by(year, state) |>
+  summarise(
+    renew     = sum(renew, na.rm = TRUE),
+    total_use = sum(total_use, na.rm = TRUE),
+    .groups   = "drop"
+  ) |>
+  mutate(
+    renew_share = if_else(total_use > 0, renew / total_use, NA_real_)
+  )
+
+energy_2023 <- energy_state_year |>
+  filter(year == 2023, state != "US")
+
+analysis_2023_full <- analysis_df |>
+  left_join(energy_2023, by = "state") |>
+  mutate(
+    ev_per_total_use = if_else(!is.na(total_use) & total_use > 0,
+                               ev_count / total_use,
+                               NA_real_)
+  )
+
+analysis_2023_full
 
 ```
 
 ## **Part 4: Mapping Visualization**
 
-```{r}
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
 
+# map1
+states_sf <- tigris::states(cb = TRUE, year = 2023, class = "sf")
+
+map_df <- states_sf |>
+  inner_join(analysis_2023_full, by = c("STUSPS" = "state"))
+
+us_projection <- st_crs(2163)
+
+# 
+p1 <- ggplot(map_df) +
+  geom_sf(aes(fill = renew_share), color = "white", size = 0.2) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    na.value = "grey90",
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  labs(
+    title = "Renewable Energy Share by State (2023)",
+    fill  = "Renewable Share"
+  ) +
+  coord_sf(crs = us_projection) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 10)
+  )
+
+p1  
 ```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+p1 
+
+# map2
+centers <- st_centroid(map_df) 
+
+p2 <- ggplot() +
+  geom_sf(
+    data = map_df,
+    aes(fill = energy_price_2023),
+    color = "white",
+    size = 0.2
+  ) +
+  geom_sf(
+    data = centers,
+    aes(size = ev_count),
+    color = "black",
+    alpha = 0.6,
+    show.legend = "point"
+  ) +
+  scale_fill_viridis_c(option = "magma", na.value = "grey90") +
+  scale_size(range = c(1, 10), labels = scales::comma_format()) +
+  labs(
+    title = "Energy Price (fill) and EV Registrations (size) in 2023",
+    fill  = "Energy Price\n($/MMBtu)",
+    size  = "EV Count"
+  ) +
+  coord_sf(crs = us_projection) +  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 10)
+  )
+
+p2
+```
+
+## **Part 5: Analysis**
+
+From the first map, we can see that the distribution of renewable energy proportions in the continental United States is not balanced. Some states in the west and northeast have relatively higher proportions of renewable energy.
+From the second map, we can observe that those states with high energy prices and a large number of electric vehicles are mainly concentrated in the west coast regions, such as California, Washington, and Oregon, as well as some parts of the northeast. This indicates that those states with more powerful clean energy or climate policies may simultaneously face higher energy prices and a faster rate of electric vehicle adoption.
+However, some states have high energy prices but few electric vehicles, which might be related to factors such as income levels, urbanization process, or charging networks. Thus, the price factor alone cannot explain the popularity of electric vehicles - the proportion of renewable energy and the policy background of each state are also equally important.

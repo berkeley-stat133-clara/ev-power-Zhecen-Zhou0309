@@ -4,16 +4,6 @@ format: typst
 
 # Lab 4 Worksheet - Practice
 
-* add something about loading a csv and having to use
-# Split the one column into four
-energy_raw <- separate(
-  energy_raw,
-  col = 1,
-  into = c("State", "2021", "2022", "2023"),
-  sep = ","
-)
-* make sure str extract is clear str_extract(.x, "\\d+\\.?\\d*")
-
 #### Q1. Extract and clean text patterns from strings using regular expressions.
 
 You are given a messy dataset of energy sources with inconsistent units and spacing.
